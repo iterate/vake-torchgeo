@@ -488,7 +488,9 @@ class RasterDataset(GeoDataset):
             IndexError: if query is not found in the index
         """
         hits = self.index.intersection(tuple(query), objects=True)
-        filepaths = cast(list[str], [hit.object["filepath"] for hit in hits])
+        filepaths = cast(
+            list[str], [cast(dict[str, Any], hit.object)["filepath"] for hit in hits]
+        )
 
         if not filepaths:
             raise IndexError(
@@ -941,7 +943,13 @@ class IntersectionDataset(GeoDataset):
             for hit2 in ds2.index.intersection(hit1.bounds, objects=True):
                 box1 = BoundingBox(*hit1.bounds)
                 box2 = BoundingBox(*hit2.bounds)
-                self.index.insert(i, tuple(box1 & box2), hit1.object["valid_footprint"])
+                self.index.insert(
+                    i,
+                    tuple(box1 & box2),
+                    cast(dict[str, shapely.geometry.Polygon], hit1.object)[
+                        "valid_footprint"
+                    ],
+                )
                 i += 1
 
         if i == 0:
