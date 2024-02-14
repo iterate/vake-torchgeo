@@ -20,8 +20,12 @@ from datetime import datetime, timedelta
 from typing import Any, cast, overload
 
 import numpy as np
+import pyproj
 import rasterio
 import torch
+from rasterio.features import shapes, sieve
+from rasterio.warp import transform_geom
+from shapely.geometry import Polygon
 from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.datasets.utils import check_integrity, download_url
@@ -847,3 +851,20 @@ def array_to_tensor(array: np.typing.NDArray[Any]) -> Tensor:
     elif array.dtype == np.uint32:
         array = array.astype(np.int64)
     return torch.tensor(array)
+
+
+def valid_data_footprint_from_datasource(
+    src: rasterio.io.DatasetReader, destination_crs: pyproj.crs.crs.CRS
+) -> Polygon:
+    # Read valid/nodata-mask
+    mask = src.read_masks()
+    # Close holes
+    sieved_mask = sieve(mask, 500)
+    # extract polygon for valid data values
+    geom = next(g for g, v in shapes(sieved_mask, transform=src.transform) if v > 0)
+
+    # Transform to the common CRS chosen in RasterDataset
+    polygon_dict = transform_geom(src_crs=src.crs, dst_crs=destination_crs, geom=geom)
+    # Create a Shapely Polygon object
+    polygon = Polygon(polygon_dict["coordinates"][0])
+    return polygon
