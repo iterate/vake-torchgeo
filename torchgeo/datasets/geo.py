@@ -953,12 +953,26 @@ class IntersectionDataset(GeoDataset):
             for hit2 in ds2.index.intersection(hit1.bounds, objects=True):
                 box1 = BoundingBox(*hit1.bounds)
                 box2 = BoundingBox(*hit2.bounds)
+                box_intersection = box1 & box2
+                # assuming hit1 is the rasterfile.
+                # It might have nodata-regions covered by other files,
+                # which RasterData will read from.
+                # we merge the footprint from all files covering this bounds
+                all_footprints_overlapping = [
+                    other.object["valid_footprint"]
+                    for other in ds1.index.intersection(ds1.index.bounds, objects=True)
+                ]
+                all_footprints_cropped_to_bounds = shapely.intersection(
+                    shapely.ops.unary_union(all_footprints_overlapping),
+                    shapely.geometry.box(box1.minx, box1.miny, box1.maxx, box1.maxy),
+                )
                 self.index.insert(
                     i,
-                    tuple(box1 & box2),
-                    cast(dict[str, shapely.geometry.Polygon], hit1.object)[
-                        "valid_footprint"
-                    ],
+                    tuple(box_intersection),
+                    cast(
+                        dict[str, shapely.geometry.Polygon],
+                        all_footprints_cropped_to_bounds,
+                    ),
                 )
                 i += 1
 
