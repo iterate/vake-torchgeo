@@ -7,6 +7,7 @@ import abc
 from collections.abc import Iterable, Iterator
 from typing import Callable, Optional, Union
 
+import shapely
 import torch
 from rtree.index import Index, Property
 from torch.utils.data import Sampler
@@ -80,6 +81,7 @@ class RandomGeoSampler(GeoSampler):
         units: Units = Units.PIXELS,
         exclude_nodata_samples: bool = False,
         max_retries: int = 50_000,
+        pos_neg_frac: float = 0.5,
     ) -> None:
         """Initialize a new Sampler instance.
 
@@ -111,11 +113,15 @@ class RandomGeoSampler(GeoSampler):
                 re-projection or inherit no-data regions in rasters.
             max_retries: is used when exclude_nodata_samples are True. Is a safe-guard
                 for infinite loops in case the nodata-mask of the raster is wrong.
+            pos_neg_frac: fraction of positive samples
         """
         super().__init__(dataset, roi)
         self.size = _to_tuple(size)
         self.exclude_nodata_samples = exclude_nodata_samples
         self.max_retries = max_retries
+        self.pos_neg_frac = pos_neg_frac
+        self.pos_sampled = 0
+        self.neg_sampled = 0
 
         if units == Units.PIXELS:
             self.size = (self.size[0] * self.res, self.size[1] * self.res)
@@ -156,16 +162,27 @@ class RandomGeoSampler(GeoSampler):
             hit = self.hits[idx]
             bounds = BoundingBox(*hit.bounds)
 
-            # positive_polygon = hit.object["positive_polygon"]
-            # negative_polygon = hit.object["negative_polygon"]
+            if (
+                self.pos_sampled == 0
+                or (self.pos_sampled / (self.pos_sampled + self.neg_sampled))
+                < self.pos_neg_frac
+            ):
+                self.pos_sampled += 1
+                footprint = hit.object["positive_polygon"]
+                spatial_operator = shapely.overlaps
+            else:
+                self.neg_sampled += 1
+                footprint = hit.object["negative_polygon"]
+                spatial_operator = shapely.within
 
             if self.exclude_nodata_samples:
                 yield get_random_bounding_box_check_valid_overlap(
-                    bounds,
-                    self.size,
-                    self.res,
-                    hit.object["positive_polygon"],
+                    bounds=bounds,
+                    size=self.size,
+                    res=self.res,
+                    valid_footprint=footprint,
                     max_retries=self.max_retries,
+                    spatial_operator=spatial_operator,
                 )
             else:
                 yield get_random_bounding_box(bounds, self.size, self.res)

@@ -80,6 +80,7 @@ def get_random_bounding_box(
 
 def get_random_bounding_box_check_valid_overlap(
     bounds: BoundingBox,
+    spatial_operator: Union[shapely.overlaps, shapely.within],
     size: Union[tuple[float, float], float],
     res: float,
     valid_footprint: shapely.geometry.Polygon,
@@ -116,7 +117,7 @@ def get_random_bounding_box_check_valid_overlap(
         bbox = shapely.geometry.box(
             bounding_box.minx, bounding_box.miny, bounding_box.maxx, bounding_box.maxy
         )
-        if shapely.overlaps(bbox, valid_footprint) or (retries >= max_retries):
+        if spatial_operator(bbox, valid_footprint) or (retries >= max_retries):
             return bounding_box
 
 
