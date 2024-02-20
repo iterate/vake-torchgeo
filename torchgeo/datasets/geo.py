@@ -684,6 +684,18 @@ class VectorDataset(GeoDataset):
                     if "date" in match.groupdict():
                         date = match.group("date")
                         mint, maxt = disambiguate_timestamp(date, self.date_format)
+                    # coords = (minx, maxx, miny, maxy, mint, maxt)
+                    # self.index.insert(
+                    #     i,
+                    #     coords,
+                    #     {
+                    #         "filepath": filepath,
+                    #         "valid_footprint": shapely.make_valid(
+                    #             shapely.unary_union(valid_footprints)
+                    #         ),
+                    #     },
+                    # )
+                    # i += 1
                     for valid_footprint in valid_footprints:
                         minx, miny, maxx, maxy = valid_footprint.bounds
                         coords = minx, maxx, miny, maxy, mint, maxt
