@@ -661,10 +661,20 @@ class VectorDataset(GeoDataset):
                         if crs is None:
                             crs = CRS.from_dict(src.crs)
 
-                        minx, miny, maxx, maxy = src.bounds
-                        (minx, maxx), (miny, maxy) = fiona.transform.transform(
-                            src.crs, crs.to_dict(), [minx, maxx], [miny, maxy]
-                        )
+                        # minx, miny, maxx, maxy = src.bounds
+                        # (minx, maxx), (miny, maxy) = fiona.transform.transform(
+                        #     src.crs, crs.to_dict(), [minx, maxx], [miny, maxy]
+                        # )
+                        valid_footprints = [
+                            shapely.make_valid(
+                                shapely.geometry.shape(
+                                    fiona.transform.transform_geom(
+                                        src.crs, crs.to_dict(), f["geometry"]
+                                    )
+                                )
+                            )
+                            for f in src
+                        ]
                 except fiona.errors.FionaValueError:
                     # Skip files that fiona is unable to read
                     continue
@@ -674,9 +684,15 @@ class VectorDataset(GeoDataset):
                     if "date" in match.groupdict():
                         date = match.group("date")
                         mint, maxt = disambiguate_timestamp(date, self.date_format)
-                    coords = (minx, maxx, miny, maxy, mint, maxt)
-                    self.index.insert(i, coords, filepath)
-                    i += 1
+                    for valid_footprint in valid_footprints:
+                        minx, miny, maxx, maxy = valid_footprint.bounds
+                        coords = minx, maxx, miny, maxy, mint, maxt
+                        self.index.insert(
+                            i,
+                            coords,
+                            {"filepath": filepath, "valid_footprint": valid_footprint},
+                        )
+                        i += 1
 
         if i == 0:
             raise DatasetNotFoundError(self)
@@ -697,7 +713,9 @@ class VectorDataset(GeoDataset):
             IndexError: if query is not found in the index
         """
         hits = self.index.intersection(tuple(query), objects=True)
-        filepaths = [hit.object for hit in hits]
+        filepaths = cast(
+            list[str], [cast(dict[str, Any], hit.object)["filepath"] for hit in hits]
+        )
 
         if not filepaths:
             raise IndexError(
@@ -954,30 +972,45 @@ class IntersectionDataset(GeoDataset):
                 box1 = BoundingBox(*hit1.bounds)
                 box2 = BoundingBox(*hit2.bounds)
                 box_intersection = box1 & box2
+                bounds = shapely.geometry.box(
+                    minx=box_intersection.minx,
+                    miny=box_intersection.miny,
+                    maxx=box_intersection.maxx,
+                    maxy=box_intersection.maxy,
+                )
                 # assuming hit1 is the rasterfile.
                 # It might have nodata-regions covered by other files,
                 # which RasterData will read from.
                 # we merge the footprint from all files covering this bounds
-                all_footprints_overlapping = [
+                all_ds1_overlapping = [
                     other.object["valid_footprint"]
-                    for other in ds1.index.intersection(ds1.index.bounds, objects=True)
+                    for other in ds1.index.intersection(
+                        tuple(box_intersection), objects=True
+                    )
                 ]
-                all_footprints_cropped_to_bounds = shapely.intersection(
-                    shapely.ops.unary_union(all_footprints_overlapping),
-                    shapely.geometry.box(
-                        box_intersection.minx,
-                        box_intersection.miny,
-                        box_intersection.maxx,
-                        box_intersection.maxy,
-                    ),
+                ds1_in_bounds = shapely.intersection(
+                    shapely.unary_union(all_ds1_overlapping), bounds
                 )
+                all_ds2_overlapping = [
+                    other.object["valid_footprint"]
+                    for other in ds2.index.intersection(
+                        tuple(box_intersection), objects=True
+                    )
+                ]
+                ds2_in_bounds = shapely.intersection(
+                    shapely.unary_union(all_ds2_overlapping), bounds
+                )
+                if ds1_in_bounds.is_empty or ds2_in_bounds.is_empty:
+                    continue
+                positive_polygon = shapely.intersection(ds1_in_bounds, ds2_in_bounds)
+                negative_polygon = ds1_in_bounds - positive_polygon
                 self.index.insert(
                     i,
                     tuple(box_intersection),
-                    cast(
-                        dict[str, shapely.geometry.Polygon],
-                        all_footprints_cropped_to_bounds,
-                    ),
+                    {
+                        "positive_polygon": positive_polygon,
+                        "negative_polygon": negative_polygon,
+                    },
                 )
                 i += 1
 

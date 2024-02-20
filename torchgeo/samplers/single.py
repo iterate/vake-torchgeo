@@ -156,12 +156,15 @@ class RandomGeoSampler(GeoSampler):
             hit = self.hits[idx]
             bounds = BoundingBox(*hit.bounds)
 
+            # positive_polygon = hit.object["positive_polygon"]
+            # negative_polygon = hit.object["negative_polygon"]
+
             if self.exclude_nodata_samples:
                 yield get_random_bounding_box_check_valid_overlap(
                     bounds,
                     self.size,
                     self.res,
-                    hit.object,
+                    hit.object["positive_polygon"],
                     max_retries=self.max_retries,
                 )
             else:
