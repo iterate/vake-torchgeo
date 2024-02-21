@@ -381,6 +381,7 @@ class RasterDataset(GeoDataset):
         bands: Optional[Sequence[str]] = None,
         transforms: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
         cache: bool = True,
+        mask_path: Optional[str] = None,
     ) -> None:
         """Initialize a new Dataset instance.
 
@@ -407,6 +408,15 @@ class RasterDataset(GeoDataset):
         self.bands = bands or self.all_bands
         self.cache = cache
 
+        geometry = None
+        mask = fiona.open(mask_path, "r") if mask_path else None
+        if mask is not None:
+            if crs is not None:
+                geometry = fiona.transform.transform_geom(
+                    CRS.from_epsg(4326).to_dict(), crs.to_dict(), mask[0]["geometry"]
+                )
+            geometry = shapely.make_valid(shapely.geometry.shape(geometry))
+
         # Populate the dataset index
         i = 0
         filename_regex = re.compile(self.filename_regex, re.VERBOSE)
@@ -428,6 +438,8 @@ class RasterDataset(GeoDataset):
                             res = src.res[0]
 
                         valid_footprint = valid_data_footprint_from_datasource(src, crs)
+                        if geometry is not None:
+                            valid_footprint = valid_footprint.intersection(geometry)
 
                         with WarpedVRT(src, crs=crs) as vrt:
                             minx, miny, maxx, maxy = vrt.bounds
@@ -454,7 +466,8 @@ class RasterDataset(GeoDataset):
                         {"filepath": filepath, "valid_footprint": valid_footprint},
                     )
                     i += 1
-
+        if mask is not None:
+            mask.close()
         if i == 0:
             raise DatasetNotFoundError(self)
 

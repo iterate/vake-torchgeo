@@ -303,6 +303,7 @@ class Sentinel2(Sentinel):
         bands: Optional[Sequence[str]] = None,
         transforms: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
         cache: bool = True,
+        mask_path: Optional[str] = None,
     ) -> None:
         """Initialize a new Dataset instance.
 
@@ -327,7 +328,7 @@ class Sentinel2(Sentinel):
         self.filename_glob = self.filename_glob.format(bands[0])
         self.filename_regex = self.filename_regex.format(res)
 
-        super().__init__(paths, crs, res, bands, transforms, cache)
+        super().__init__(paths, crs, res, bands, transforms, cache, mask_path)
 
     def plot(
         self,
