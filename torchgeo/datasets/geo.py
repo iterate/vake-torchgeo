@@ -38,6 +38,7 @@ from .utils import (
     disambiguate_timestamp,
     merge_samples,
     path_is_vsi,
+    valid_data_footprint_from_datasource,
 )
 
 
@@ -380,6 +381,7 @@ class RasterDataset(GeoDataset):
         bands: Optional[Sequence[str]] = None,
         transforms: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
         cache: bool = True,
+        mask_path: Optional[str] = None,
     ) -> None:
         """Initialize a new Dataset instance.
 
@@ -406,6 +408,15 @@ class RasterDataset(GeoDataset):
         self.bands = bands or self.all_bands
         self.cache = cache
 
+        geometry = None
+        mask = fiona.open(mask_path, "r") if mask_path else None
+        if mask is not None:
+            if crs is not None:
+                geometry = fiona.transform.transform_geom(
+                    CRS.from_epsg(4326).to_dict(), crs.to_dict(), mask[0]["geometry"]
+                )
+            geometry = shapely.make_valid(shapely.geometry.shape(geometry))
+
         # Populate the dataset index
         i = 0
         filename_regex = re.compile(self.filename_regex, re.VERBOSE)
@@ -426,6 +437,10 @@ class RasterDataset(GeoDataset):
                         if res is None:
                             res = src.res[0]
 
+                        valid_footprint = valid_data_footprint_from_datasource(src, crs)
+                        if geometry is not None:
+                            valid_footprint = valid_footprint.intersection(geometry)
+
                         with WarpedVRT(src, crs=crs) as vrt:
                             minx, miny, maxx, maxy = vrt.bounds
                 except rasterio.errors.RasterioIOError:
@@ -444,9 +459,15 @@ class RasterDataset(GeoDataset):
                         _, maxt = disambiguate_timestamp(stop, self.date_format)
 
                     coords = (minx, maxx, miny, maxy, mint, maxt)
-                    self.index.insert(i, coords, filepath)
-                    i += 1
 
+                    self.index.insert(
+                        i,
+                        coords,
+                        {"filepath": filepath, "valid_footprint": valid_footprint},
+                    )
+                    i += 1
+        if mask is not None:
+            mask.close()
         if i == 0:
             raise DatasetNotFoundError(self)
 
@@ -480,7 +501,9 @@ class RasterDataset(GeoDataset):
             IndexError: if query is not found in the index
         """
         hits = self.index.intersection(tuple(query), objects=True)
-        filepaths = cast(list[str], [hit.object for hit in hits])
+        filepaths = cast(
+            list[str], [cast(dict[str, Any], hit.object)["filepath"] for hit in hits]
+        )
 
         if not filepaths:
             raise IndexError(
@@ -569,11 +592,21 @@ class RasterDataset(GeoDataset):
         Returns:
             file handle of warped VRT
         """
+        # Todo: need to update meta kwarg `nodata` if it is not set.
+        #  create memory-file?
+        #  https://rasterio.groups.io/g/main/topic/change_the_nodata_value_in_a/28801885?p=
         src = rasterio.open(filepath)
 
         # Only warp if necessary
         if src.crs != self.crs:
-            vrt = WarpedVRT(src, crs=self.crs)
+            valid_nodatavals = [val for val in src.nodatavals if val is not None]
+            if not valid_nodatavals:  # Case for Sentinel2 L1C
+                nodata = 0.0  # Is it safe to assume? For Sentinel2 L1C it is 0.0
+            else:
+                # Get the first valid nodata value.
+                # Usualy the same value for all bands
+                nodata = valid_nodatavals[0]
+            vrt = WarpedVRT(src, nodata=nodata, crs=self.crs)
             src.close()
             return vrt
         else:
@@ -640,11 +673,16 @@ class VectorDataset(GeoDataset):
                     with fiona.open(filepath) as src:
                         if crs is None:
                             crs = CRS.from_dict(src.crs)
-
-                        minx, miny, maxx, maxy = src.bounds
-                        (minx, maxx), (miny, maxy) = fiona.transform.transform(
-                            src.crs, crs.to_dict(), [minx, maxx], [miny, maxy]
-                        )
+                        valid_footprints = [
+                            shapely.make_valid(
+                                shapely.geometry.shape(
+                                    fiona.transform.transform_geom(
+                                        src.crs, crs.to_dict(), f["geometry"]
+                                    )
+                                )
+                            )
+                            for f in src
+                        ]
                 except fiona.errors.FionaValueError:
                     # Skip files that fiona is unable to read
                     continue
@@ -654,9 +692,15 @@ class VectorDataset(GeoDataset):
                     if "date" in match.groupdict():
                         date = match.group("date")
                         mint, maxt = disambiguate_timestamp(date, self.date_format)
-                    coords = (minx, maxx, miny, maxy, mint, maxt)
-                    self.index.insert(i, coords, filepath)
-                    i += 1
+                    for valid_footprint in valid_footprints:
+                        minx, miny, maxx, maxy = valid_footprint.bounds
+                        coords = minx, maxx, miny, maxy, mint, maxt
+                        self.index.insert(
+                            i,
+                            coords,
+                            {"filepath": filepath, "valid_footprint": valid_footprint},
+                        )
+                        i += 1
 
         if i == 0:
             raise DatasetNotFoundError(self)
@@ -677,7 +721,9 @@ class VectorDataset(GeoDataset):
             IndexError: if query is not found in the index
         """
         hits = self.index.intersection(tuple(query), objects=True)
-        filepaths = [hit.object for hit in hits]
+        filepaths = cast(
+            list[str], [cast(dict[str, Any], hit.object)["filepath"] for hit in hits]
+        )
 
         if not filepaths:
             raise IndexError(
@@ -933,7 +979,47 @@ class IntersectionDataset(GeoDataset):
             for hit2 in ds2.index.intersection(hit1.bounds, objects=True):
                 box1 = BoundingBox(*hit1.bounds)
                 box2 = BoundingBox(*hit2.bounds)
-                self.index.insert(i, tuple(box1 & box2))
+                box_intersection = box1 & box2
+                bounds = shapely.geometry.box(
+                    minx=box_intersection.minx,
+                    miny=box_intersection.miny,
+                    maxx=box_intersection.maxx,
+                    maxy=box_intersection.maxy,
+                )
+                # assuming hit1 is the rasterfile.
+                # It might have nodata-regions covered by other files,
+                # which RasterData will read from.
+                # we merge the footprint from all files covering this bounds
+                all_ds1_overlapping = [
+                    other.object["valid_footprint"]
+                    for other in ds1.index.intersection(
+                        tuple(box_intersection), objects=True
+                    )
+                ]
+                ds1_in_bounds = shapely.intersection(
+                    shapely.unary_union(all_ds1_overlapping), bounds
+                )
+                all_ds2_overlapping = [
+                    other.object["valid_footprint"]
+                    for other in ds2.index.intersection(
+                        tuple(box_intersection), objects=True
+                    )
+                ]
+                ds2_in_bounds = shapely.intersection(
+                    shapely.unary_union(all_ds2_overlapping), bounds
+                )
+                if ds1_in_bounds.is_empty or ds2_in_bounds.is_empty:
+                    continue
+                positive_polygon = shapely.intersection(ds1_in_bounds, ds2_in_bounds)
+                negative_polygon = ds1_in_bounds - positive_polygon
+                self.index.insert(
+                    i,
+                    tuple(box_intersection),
+                    {
+                        "positive_polygon": positive_polygon,
+                        "negative_polygon": negative_polygon,
+                    },
+                )
                 i += 1
 
         if i == 0:
